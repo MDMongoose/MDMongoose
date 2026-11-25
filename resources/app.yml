@@ -1,0 +1,27 @@
+resources:
+  apps:
+    mdm:
+      name: ${var.app_name}
+      description: MDMongoose — MDM without Madness. One hierarchy in one Delta table.
+      source_code_path: ..  # repo root: app.yaml, requirements.txt, package.json
+      resources:
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
+        - name: core-job
+          job:
+            id: ${resources.jobs.mdm_core_job.id}
+            permission: CAN_MANAGE_RUN
+        - name: load-job
+          job:
+            id: ${resources.jobs.mdm_load.id}
+            permission: CAN_MANAGE_RUN
+        - name: export-job
+          job:
+            id: ${resources.jobs.mdm_export_job.id}
+            permission: CAN_MANAGE_RUN
+        - name: match-train-job
+          job:
+            id: ${resources.jobs.mdm_match_train.id}
+            permission: CAN_MANAGE_RUN

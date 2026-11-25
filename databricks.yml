@@ -1,0 +1,70 @@
+# Declarative Automation Bundle (formerly Databricks Asset Bundles) for the MDM app.
+#   databricks bundle deploy -t <target>    # schemas, volume, app, pipelines, jobs (no local build needed)
+#   databricks bundle run -t <target> mdm_init && databricks bundle run -t <target> mdm_app
+# Schemas and the export volume are bundle resources (resources/schemas.yml): deploy creates them. A schema that
+# already exists must be bound once (README), and `bundle destroy` drops them with their data.
+bundle:
+  name: mdm
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: Unity Catalog catalog for all MDM schemas (Free Edition has `workspace`).
+    default: workspace
+  demo:
+    description: Seed the demo (countries, SAP/Salesforce sources, survivorship rule, Customer).
+    default: "true"
+  core_schema_name:
+    description: Schema of MDMNodes, the run log (mdm_log) and the export volume.
+    default: mdm_core
+  staging_schema_name:
+    description: Schema of the source tables and the load snapshots (rec_*); target of the mdm_load pipeline.
+    default: mdm_staging
+  export_schema_name:
+    description: Schema of the exported materialized views and views and the search index; target of mdm_export.
+    default: mdm_export
+  export_volume:
+    description: Volume (in the core schema) for exported CSV / Excel files.
+    default: exports
+  app_name:
+    default: mdm
+  warehouse_id:
+    description: SQL warehouse the app uses for reads/writes of MDMNodes.
+    lookup:
+      warehouse: Serverless Starter Warehouse
+
+sync:
+  # The React UI is built by Databricks Apps on deploy (root package.json), so nothing
+  # has to be built before `bundle deploy` — deploying straight from a Git folder works.
+  exclude:
+    - app/frontend/node_modules/**
+    - "**/__pycache__/**"
+
+targets:
+  # Each target is one MDM installation. Override any variable per target, or on the command line:
+  #   databricks bundle deploy -t uat --var="catalog=uat_catalog"
+  dev:
+    mode: development  # resources prefixed "[dev <user>]", schedules paused
+    workspace:
+      root_path: ~/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      app_name: mdm-dev
+  uat:
+    presets:
+      name_prefix: "[uat] "
+    workspace:
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      app_name: mdm-uat
+  free:
+    # Databricks Free Edition / any serverless workspace. No development-mode name
+    # prefixes, so the schema and table names in the app stay fixed.
+    default: true
+    workspace:
+      root_path: ~/.bundle/${bundle.name}/${bundle.target}
+  prod:
+    mode: production
+    workspace:
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}

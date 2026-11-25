@@ -1,0 +1,26 @@
+# The schemas and the export volume are created by `bundle deploy` (names: databricks.yml variables).
+# Jobs and pipelines reference them as ${resources.schemas.<key>.name}, so a prefix added by the target
+# (mode: development, presets.name_prefix) is followed everywhere.
+# An object that already exists is not adopted automatically: bind it once (README → "Existing schemas"),
+# otherwise the deploy fails with "already exists". `bundle destroy` drops bound/created schemas with their data.
+resources:
+  schemas:
+    mdm_core:
+      catalog_name: ${var.catalog}
+      name: ${var.core_schema_name}
+      comment: MDMNodes — the hierarchy and the run log
+    mdm_staging:
+      catalog_name: ${var.catalog}
+      name: ${var.staging_schema_name}
+      comment: Source tables and load snapshots (rec_*)
+    mdm_export:
+      catalog_name: ${var.catalog}
+      name: ${var.export_schema_name}
+      comment: Materialized views, views, the search index and the export files volume
+
+  volumes:
+    exports:
+      catalog_name: ${var.catalog}
+      schema_name: ${resources.schemas.mdm_export.name}
+      name: ${var.export_volume}
+      comment: Export files written by background export runs
