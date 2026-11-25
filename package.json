@@ -1,0 +1,8 @@
+{
+  "name": "mdm-app",
+  "private": true,
+  "description": "Build hook for Databricks Apps: builds the React UI in app/frontend on deploy",
+  "scripts": {
+    "build": "npm --prefix app/frontend ci --no-audit --no-fund && npm --prefix app/frontend run build"
+  }
+}

@@ -1,0 +1,226 @@
+# All jobs run on serverless compute. The app starts mdm_load, mdm_core, mdm_match_train and
+# mdm_export with job parameters; mdm_init is run once after deploy; mdm_refresh is a (paused) hourly.
+# Every job writes one row per activity to <catalog>.<core_schema_name>.mdm_log ({{job.run_id}} links them).
+# Every Python task gets the schema and volume names of the target (resources/schemas.yml).
+resources:
+  jobs:
+    mdm_init:
+      name: mdm_init
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "3"
+            dependencies:
+              - openpyxl==3.1.5
+              - croniter==6.0.0
+              - duckdb==1.4.4
+      parameters:
+        - { name: catalog, default: "${var.catalog}" }
+        - { name: demo, default: "${var.demo}" }
+      tasks:
+        - task_key: init
+          environment_key: default
+          spark_python_task:
+            python_file: ../jobs/init.py
+            parameters: [--src, "${workspace.file_path}/src", --catalog, "{{job.parameters.catalog}}",
+                         --core_schema, "${resources.schemas.mdm_core.name}", --staging_schema, "${resources.schemas.mdm_staging.name}",
+                         --export_schema, "${resources.schemas.mdm_export.name}", --export_volume, "${resources.volumes.exports.name}",
+                         --demo, "{{job.parameters.demo}}", --app_name, "${var.app_name}",
+                         --job_run_id, "{{job.run_id}}"]
+        - task_key: load_pipeline
+          depends_on: [{ task_key: init }]
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.mdm_load_pipeline.id}
+        - task_key: merge_records
+          depends_on: [{ task_key: load_pipeline }]
+          environment_key: default
+          spark_python_task:
+            python_file: ../jobs/load_table.py
+            parameters: [--src, "${workspace.file_path}/src", --catalog, "{{job.parameters.catalog}}",
+                         --core_schema, "${resources.schemas.mdm_core.name}", --staging_schema, "${resources.schemas.mdm_staging.name}",
+                         --export_schema, "${resources.schemas.mdm_export.name}", --export_volume, "${resources.volumes.exports.name}",
+                         --table_uid, all, --run_pipeline, "false", --job_run_id, "{{job.run_id}}"]
+        - task_key: match_and_golden
+          depends_on: [{ task_key: merge_records }]
+          environment_key: default
+          spark_python_task:
+            python_file: ../jobs/run_core.py
+            parameters: [--src, "${workspace.file_path}/src", --catalog, "{{job.parameters.catalog}}",
+                         --core_schema, "${resources.schemas.mdm_core.name}", --staging_schema, "${resources.schemas.mdm_staging.name}",
+                         --export_schema, "${resources.schemas.mdm_export.name}", --export_volume, "${resources.volumes.exports.name}",
+                         --action, match, --uid, all, --mode, incremental, --user, mdm_init, --job_run_id, "{{job.run_id}}"]
+        - task_key: exports
+          # after matching, even when matching failed, but never when init failed (nothing to export yet)
+          depends_on: [{ task_key: init }, { task_key: match_and_golden }]
+          run_if: AT_LEAST_ONE_SUCCESS
+          run_job_task:
+            job_id: ${resources.jobs.mdm_export_job.id}
+
+    mdm_load:
+      name: mdm_load
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "3"
+            dependencies:
+              - openpyxl==3.1.5
+              - croniter==6.0.0
+              - duckdb==1.4.4
+      # runs on different Tables go in parallel; a run that would load a Table an earlier run is loading waits
+      # for it (prepare, mdm/load_steps.py)
+      max_concurrent_runs: 4
+      queue: { enabled: true }
+      parameters:
+        - { name: table_uid, default: all }   # Table UIDs (comma-separated) | all | due
+        - { name: user, default: mdm_load }
+        - { name: exports, default: all }   # none: a Golden records run refreshes the exports at its end
+      tasks:
+        # which Tables, wait for an earlier run on the same Table, one load-pipeline update for all of them
+        - task_key: prepare
+          environment_key: default
+          spark_python_task:
+            python_file: ../jobs/load_table.py
+            parameters: [--src, "${workspace.file_path}/src", --catalog, "${var.catalog}",
+                         --core_schema, "${resources.schemas.mdm_core.name}", --staging_schema, "${resources.schemas.mdm_staging.name}",
+                         --export_schema, "${resources.schemas.mdm_export.name}", --export_volume, "${resources.volumes.exports.name}",
+                         --step, prepare, --table_uid, "{{job.parameters.table_uid}}", --user, "{{job.parameters.user}}",
+                         --run_pipeline, "true", --pipeline_id, "${resources.pipelines.mdm_load_pipeline.id}",
+                         --job_id, "{{job.id}}", --job_run_id, "{{job.run_id}}"]
+        - task_key: has_tables
+          depends_on: [{ task_key: prepare }]
+          condition_task:
+            op: GREATER_THAN
+            left: "{{tasks.prepare.values.count}}"
+            right: "0"
+        # one iteration per Table, up to 4 at the same time: merge its changes into MDMNodes
+        - task_key: load_tables
+          depends_on: [{ task_key: has_tables, outcome: "true" }]
+          for_each_task:
+            inputs: "{{tasks.prepare.values.tables}}"
+            concurrency: 4
+            task:
+              task_key: load_table
+              environment_key: default
+              spark_python_task:
+                python_file: ../jobs/load_table.py
+                parameters: [--src, "${workspace.file_path}/src", --catalog, "${var.catalog}",
+                         --core_schema, "${resources.schemas.mdm_core.name}", --staging_schema, "${resources.schemas.mdm_staging.name}",
+                         --export_schema, "${resources.schemas.mdm_export.name}", --export_volume, "${resources.volumes.exports.name}",
+                             --step, table, --table_uid, "{{input}}", --user, "{{job.parameters.user}}",
+                             --job_run_id, "{{job.run_id}}"]
+        # matching and golden records (Tables with Run Golden After Load), then the exports
+        - task_key: after_load
+          depends_on: [{ task_key: load_tables }]
+          environment_key: default
+          spark_python_task:
+            python_file: ../jobs/load_table.py
+            parameters: [--src, "${workspace.file_path}/src", --catalog, "${var.catalog}",
+                         --core_schema, "${resources.schemas.mdm_core.name}", --staging_schema, "${resources.schemas.mdm_staging.name}",
+                         --export_schema, "${resources.schemas.mdm_export.name}", --export_volume, "${resources.volumes.exports.name}",
+                         --step, after, --table_uid, "{{tasks.prepare.values.tables_csv}}", --user, "{{job.parameters.user}}",
+                         --export_job_id, "${resources.jobs.mdm_export_job.id}", --exports, "{{job.parameters.exports}}",
+                         --job_run_id, "{{job.run_id}}"]
+
+    mdm_core_job:  # key differs from the mdm_core schema (bundle keys must be unique); the job is named mdm_core
+      name: mdm_core
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "3"
+            dependencies:
+              - openpyxl==3.1.5
+              - croniter==6.0.0
+              - duckdb==1.4.4
+      # matching, golden records and background actions; runs on different Master Data nodes go in parallel,
+      # a run on the same node waits for the earlier one (jobs/run_core.py)
+      max_concurrent_runs: 4
+      queue: { enabled: true }
+      parameters:
+        - { name: action, default: match }            # match | mdm.golden.refresh | mdm.export.run | mdm_custom.<fn>
+        - { name: uid, default: all }
+        - { name: user, default: mdm_core }
+        - { name: options, default: "{}" }
+        - { name: mode, default: incremental }        # match: incremental | full
+        - { name: preview, default: "false" }         # match: true writes nothing
+        - { name: golden, default: "true" }           # match: refresh the golden records afterwards
+        - { name: exports, default: all }             # none | all | Export node UIDs (the app sends none for a preview)
+      tasks:
+        - task_key: core
+          environment_key: default
+          spark_python_task:
+            python_file: ../jobs/run_core.py
+            parameters: [--src, "${workspace.file_path}/src", --catalog, "${var.catalog}",
+                         --core_schema, "${resources.schemas.mdm_core.name}", --staging_schema, "${resources.schemas.mdm_staging.name}",
+                         --export_schema, "${resources.schemas.mdm_export.name}", --export_volume, "${resources.volumes.exports.name}",
+                         --target, "${bundle.target}",
+                         --action, "{{job.parameters.action}}", --uid, "{{job.parameters.uid}}",
+                         --user, "{{job.parameters.user}}", --options, "{{job.parameters.options}}",
+                         --mode, "{{job.parameters.mode}}", --preview, "{{job.parameters.preview}}",
+                         --golden, "{{job.parameters.golden}}", --exports, "{{job.parameters.exports}}",
+                         --job_id, "{{job.id}}", --job_run_id, "{{job.run_id}}",
+                         --export_pipeline_id, "${resources.pipelines.mdm_export_pipeline.id}"]
+
+    mdm_match_train:
+      name: mdm_match_train
+      environments:
+        - environment_key: train
+          spec:
+            environment_version: "3"
+            dependencies:
+              - duckdb==1.4.4
+              - splink==4.0.17
+      max_concurrent_runs: 1
+      queue: { enabled: true }
+      parameters:
+        - { name: uid, default: "" }
+        - { name: user, default: mdm_match_train }
+        - { name: activate, default: "false" }
+      tasks:
+        - task_key: train
+          environment_key: train
+          spark_python_task:
+            python_file: ../jobs/train_matching.py
+            parameters: [--src, "${workspace.file_path}/src", --catalog, "${var.catalog}",
+                         --core_schema, "${resources.schemas.mdm_core.name}", --staging_schema, "${resources.schemas.mdm_staging.name}",
+                         --export_schema, "${resources.schemas.mdm_export.name}", --export_volume, "${resources.volumes.exports.name}",
+                         --uid, "{{job.parameters.uid}}", --user, "{{job.parameters.user}}",
+                         --activate, "{{job.parameters.activate}}", --job_run_id, "{{job.run_id}}"]
+
+    mdm_export_job:  # key differs from the mdm_export schema (bundle keys must be unique); the job is still named mdm_export
+      name: mdm_export
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "3"
+            dependencies:
+              - openpyxl==3.1.5
+              - croniter==6.0.0
+              - duckdb==1.4.4
+      max_concurrent_runs: 1
+      queue: { enabled: true }
+      parameters:
+        - { name: uid, default: all }
+        - { name: user, default: mdm_export }
+      tasks:
+        - task_key: views_and_files
+          environment_key: default
+          spark_python_task:
+            python_file: ../jobs/run_exports.py
+            parameters: [--src, "${workspace.file_path}/src", --catalog, "${var.catalog}",
+                         --core_schema, "${resources.schemas.mdm_core.name}", --staging_schema, "${resources.schemas.mdm_staging.name}",
+                         --export_schema, "${resources.schemas.mdm_export.name}", --export_volume, "${resources.volumes.exports.name}",
+                         --uid, "{{job.parameters.uid}}", --user, "{{job.parameters.user}}",
+                         --job_run_id, "{{job.run_id}}", --export_pipeline_id, "${resources.pipelines.mdm_export_pipeline.id}"]
+
+    mdm_refresh:
+      name: mdm_refresh (hourly — loads tables whose Schedule is due)
+      schedule:
+        quartz_cron_expression: "0 7 * * * ?"
+        timezone_id: UTC
+        pause_status: PAUSED
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: load_due_tables   # mdm_load for the Tables whose Schedule is due (they load in parallel)
+          run_job_task:
+            job_id: ${resources.jobs.mdm_load.id}
+            job_parameters: { table_uid: due, user: mdm_schedule }

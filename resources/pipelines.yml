@@ -1,0 +1,30 @@
+# The target schemas are bundle resources (resources/schemas.yml), created by `bundle deploy`.
+resources:
+  pipelines:
+    mdm_load_pipeline:
+      name: mdm_load
+      catalog: ${var.catalog}
+      schema: ${resources.schemas.mdm_staging.name}
+      serverless: true
+      channel: CURRENT
+      continuous: false
+      libraries:
+        - file:
+            path: ../pipelines/load.py
+      configuration:
+        mdm.nodes_table: ${var.catalog}.${resources.schemas.mdm_core.name}.mdmnodes
+        mdm.src_path: ${workspace.file_path}/src
+
+    mdm_export_pipeline:
+      name: mdm_export
+      catalog: ${var.catalog}
+      schema: ${resources.schemas.mdm_export.name}
+      serverless: true
+      channel: CURRENT
+      continuous: false
+      libraries:
+        - file:
+            path: ../pipelines/export.py
+      configuration:
+        mdm.nodes_table: ${var.catalog}.${resources.schemas.mdm_core.name}.mdmnodes
+        mdm.src_path: ${workspace.file_path}/src

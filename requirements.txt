@@ -1,0 +1,2 @@
+# Installed by Databricks Apps on deploy (the app's source is the repo root).
+-r app/requirements.txt

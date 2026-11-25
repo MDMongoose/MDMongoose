@@ -1,0 +1,14 @@
+# Databricks Apps runtime config. Values with valueFrom come from the app's
+# resources declared in resources/mdm.app.yml.
+command: ["python", "-m", "backend.run"]
+env:
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: MDM_ACTION_JOB_ID
+    valueFrom: action-job
+  - name: MDM_LOAD_JOB_ID
+    valueFrom: load-job
+  - name: MDM_NODES_TABLE
+    value: "workspace.mdm_core.mdmnodes"
+  - name: MDM_ADMINS
+    value: ""

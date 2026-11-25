@@ -1,0 +1,30 @@
+# Databricks Apps runtime config. The app's source is the repository root, so the app
+# gets src/ (the mdm package) and app/ without any copy step. On deploy, Databricks runs
+# `npm install`, `pip install -r requirements.txt`, then `npm run build` (builds the
+# React UI into app/frontend/dist), then this command.
+# Values with valueFrom come from the app resources in resources/app.yml. The catalog, schema and volume
+# names are read from the mdm_core job's arguments (databricks.yml variables), so nothing here is per target.
+command: ["python", "app/backend/run.py"]
+env:
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: MDM_CORE_JOB_ID
+    valueFrom: core-job
+  - name: MDM_LOAD_JOB_ID
+    valueFrom: load-job
+  - name: MDM_EXPORT_JOB_ID
+    valueFrom: export-job
+  - name: MDM_MATCH_TRAIN_JOB_ID
+    valueFrom: match-train-job
+  - name: MDM_ADMINS
+    value: ""
+  # Keep the SQL warehouse awake during working hours (costs warehouse time; empty = off), e.g. "08:00-18:00"
+  - name: MDM_KEEP_WARM
+    value: ""
+  - name: MDM_KEEP_WARM_TZ
+    value: "Europe/Budapest"
+  - name: MDM_KEEP_WARM_DAYS
+    value: "Mon-Fri"
+  # API requests slower than this (ms) are logged with their slowest SQL statements
+  - name: MDM_SLOW_MS
+    value: "1500"
